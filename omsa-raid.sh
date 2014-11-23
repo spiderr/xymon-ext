@@ -56,6 +56,9 @@
 #		Fix to work with OMSA 5.0.0 and greater
 #		Minor clean up to code here and there
 #	bda20@cam.ac.uk - Ben Argyle, University of Cambridge
+# V1.5 2014-11-23 Fix for subshell issues with multiple controllers
+#   spiderr@bitweaver.org
+# 
 #
 # This script is public-domain software and may be modified
 # as you wish.  If you do, please include the revision history.
