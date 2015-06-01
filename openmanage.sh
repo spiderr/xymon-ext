@@ -159,8 +159,7 @@ touch ${OMREPORTS_FILE} # So the cat from the message line won't choke
 #
 # Any errors?
 #
-omreport chassis | grep -A9 "SEVERITY" | grep -v \
-"SEVERITY" > ${DATAFILE}
+omreport chassis | grep ':' | grep -v "SEVERITY" > ${DATAFILE}
 
 #
 # Figure out color based on severity
