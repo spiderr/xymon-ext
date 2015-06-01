@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/bin/sh 
 
 #
-# xymon-omsa-raid.sh	External script for Big Brother
+# xy-omsa-raid.sh	External script for Big Brother
 #
 # Local RAID monitoring for Dell PowerEdge RAID Controllers (PERC) in 
 # conjunction with Dell's OpenManage Server Administration (OMSA) tool 
@@ -25,12 +25,17 @@
 #	LSI Logic PERC5/E					     - Add-in
 #	LSI Logic PERC6/i, PERC6/iR				     - ROMB
 #	LSI Logic PERC6/E					     - Add-in
+# 	LSI Logic H700 						     - ROMB
+#	(please submit other working controllers!)
 #
 #	ATA
 #	---
 #	LSI Logic CERC ATA 100/4ch				     - Add-in
 #	Adaptec CERC SATA1.5/6ch, SATA1.5/2s			     - ROMB
 #
+# And on the following versions of OMSA:
+#
+#	3.3, 4.5, 5.0, 5.5, 6.0, 6.5
 
 #
 # Revision History:
@@ -42,23 +47,37 @@
 #		Some cosmetic changes
 #		Verified compatiblity with certain CERCs
 #	bda20@cam.ac.uk -- Ben Argyle, University of Cambridge
-# V1.2	2005-12-01 Minor bugfixes to doeal with capitalisation issues
+# V1.2	2005-12-01 Minor bugfixes to deal with capitalisation issues
 #	bda20@cam.ac.uk -- Ben Argyle, University of Cambridge
 # V1.3  2007-01-02 Functionality fix suggestions by Shane Presley
 #		Fix to work with PERC5 cards, also
 #		Superfluous report lines removed but verbosity increased
 #		 (sorry if this isn't what you wanted)
 #		Fixed typos and errors in some comments
-#	bda20@cam.ac.uk - Ben Argyle, University of Cambridge
+#	bda20@cam.ac.uk -- Ben Argyle, University of Cambridge
 # V1.4	2009-03-16 Functionality fix suggestion by Gabriel Petrescu
 #		Fix to work with PERC6 cards while remaining backwards 
 #		 compatible with older PERCs, also
 #		Fix to work with OMSA 5.0.0 and greater
 #		Minor clean up to code here and there
-#	bda20@cam.ac.uk - Ben Argyle, University of Cambridge
-# V1.5 2014-11-23 Fix for subshell issues with multiple controllers
-#   spiderr@bitweaver.org
-# 
+#	bda20@cam.ac.uk -- Ben Argyle, University of Cambridge
+#
+# V2.0  2011-07-20 Complete and utter major rewrite, from scratch, seriously
+#		Thanks to Mike Brodbelt for configuration samples and testing
+#		Everything has changed, but it should be a lot more
+#		 resilient with regard to versions of OMSA, PERCs
+#		 and all the other variations they throw up
+#		Flags up a few new things like issues with firmware
+#		 versions and should be a bit easier to add new tests 
+#	ben@lspace.org -- Ben Argyle, University of Cambridge
+# V2.1  2011-08-12 Bugfix for battery status and overall array status colo(u)r
+#		Stupid thing wasn't giving the right colo(u)r back when charging
+#       ben@lspace.org -- Ben Argyle, University of Cambridge
+# V2.2  2012-04-03 Bugfix for multiple virtual disks, clean up of loop logic
+#		NOTE: Non-Critical disks now marked as "green" as OMSA marks all
+#		non-Dell branded disks as "Non-Critical"
+#	ben@lspace.org -- Ben Argyle, University of Cambridge
+
 #
 # This script is public-domain software and may be modified
 # as you wish.  If you do, please include the revision history.
@@ -70,14 +89,12 @@
 # the same restrictions as Big Brother.
 #
 
-
 #
 # XYMONPROG should just contain the name of this file
 # Useful when you get environment dumps to locate
 # the offending script
 #
-XYMONPROG=omsa-raid.sh; export XYMONPROG
-
+XYMONPROG=xy-omsa-raid.sh; export XYMONPROG
 
 #
 # TEST will become a column on the display
@@ -88,7 +105,6 @@ XYMONPROG=omsa-raid.sh; export XYMONPROG
 #
 TEST="raid"
 
-
 #########################################################
 #
 # For testing purposes only
@@ -96,402 +112,310 @@ TEST="raid"
 # and you want output to screen rather than just the file
 # and not send the data to the Big Brother server
 #
-#export XYMONHOME=/usr/lib/xymon/client
+#export XYMONHOME=/usr/share/xymon-client/
+#export XYMONTMP=/tmp
 #########################################################
-
 
 if test ! "$XYMONHOME"
 then
-	echo "${XYMONPROG}: XYMONHOME is not set"
-	exit 1
+ echo "${XYMONPROG}: XYMONHOME is not set"
+ exit 1
 fi
 
 if test ! -d "$XYMONHOME"
 then
-	echo "${XYMONPROG}: XYMONHOME is invalid"
-	exit 1
+ echo "${XYMONPROG}: XYMONHOME is invalid"
+ exit 1
 fi
 
 #
-# Set up global variables/files
+# Set up global variables/files/function
 #
-DATE=`date`
-RAID_CONTROLLERS=$XYMONTMP/xymon_omsa-raid-controllers.tmp
-CHECK_CONTROLLERS=$XYMONTMP/xymon_omsa-raid-check-controllers.tmp
-CHECK_VIRTUAL_DISKS=$XYMONTMP/xymon_omsa-raid-check-virtual-disks.tmp
-FILE_OMREPORT_BATTERY=$XYMONTMP/xymon_omsa-raid-data-battery.tmp
-FILE_OMREPORT_STORAGE_VDISK=$XYMONTMP/xymon_omsa-raid-data-storage-vdisk.tmp
-FILE_OMREPORT_STORAGE_PDISK=$XYMONTMP/xymon_omsa-raid-data-storage-pdisk.tmp
-OMREPORT=/opt/dell/srvadmin/bin/omreport
+OMREPORT="/opt/dell/srvadmin/bin/omreport"
 RAW_OMSA=`$OMREPORT about -fmt ssv | grep Version | cut -d";" -f2`
 OMSA_VERSION=`echo $RAW_OMSA | tr -d "."`
+CONTROLLER_FULL=$XYMONTMP/xy-omsa-raid_controller-full.tmp
+CONTROLLER_ONLY=$XYMONTMP/xy-omsa-raid_controller-only.tmp
+VDISKS_ONLY=$XYMONTMP/xy-omsa-raid_vdisks-only.tmp
+ADISKS_ONLY=$XYMONTMP/xy-omsa-raid_adisks-only.tmp
+BATTERY_ONLY=$XYMONTMP/xy-omsa-raid_battery-only.tmp
+CONTROLLER_XYMON_OUT=$XYMONTMP/xy-omsa-raid_controller-xy-out.tmp
+VDISKS_XYMON_OUT=$XYMONTMP/xy-omsa-raid_vdisks-xy-out.tmp
+BATTERY_XYMON_OUT=$XYMONTMP/xy-omsa-raid_battery-xy-out.tmp
+CUMULATIVE_XYMON_OUT=$XYMONTMP/xy-omsa-raid_cumulative-xy-out.tmp
 
-#
-# Note that two of the files need to be created as 'rm' will 
-# complain if they're not there.  They won't be used if the 
-# test can't find anything wrong.
-#
-touch ${CHECK_CONTROLLERS} ${CHECK_VIRTUAL_DISKS} 
+function rpad {
+ word="$1"
+ while [ ${#word} -lt $2 ]; do
+  word="$word$3";
+ done;
+ echo "$word";
+}
 
 #
 # Set the default overall COLOR (result) for the test.
 #
 COLOR="green"
 
-set_color() {
-	if [[ $COLOR != "red" ]]; then
-		COLOR=$1
-	fi
-}
+#
+# Stick in the header
+#
+echo > $CUMULATIVE_XYMON_OUT
+echo "Dell PowerEdge RAID Controller Status (OMSA v$RAW_OMSA)" >> $CUMULATIVE_XYMON_OUT
+echo "===================================================" >> $CUMULATIVE_XYMON_OUT
+echo  >> $CUMULATIVE_XYMON_OUT
 
-OUTPUT="\nDell PowerEdge RAID Controller (PERC/CERC) Status (OMSA v$RAW_OMSA)\n===============================================================\n"
-
-$OMREPORT storage controller -fmt ssv | grep -v "Controller"  | grep -v "^$" | sed -e :a -e '$!N;s/\n;/;/;ta' -e 'P;D' > ${RAID_CONTROLLERS}
-
-while read line 
+controller_count=`$OMREPORT storage controller -fmt ssv | egrep '^[0-9]' | wc -l`
+for (( controller_id=0; controller_id<$controller_count; controller_id++ ))
 do
-	echo $line | grep "Slot ID" > /dev/null
-	if [ $? -eq 0 ]; then
+ $OMREPORT storage controller controller=$controller_id > $CONTROLLER_FULL
 
-		cid_tag=`echo $line | cut -d";" -f1`
-		cstatus_tag=`echo $line | cut -d";" -f2`
-		cname_tag=`echo $line | cut -d";" -f3`
-		cslot_id_tag=`echo $line | cut -d";" -f4`
-		cstate_tag=`echo $line | cut -d";" -f5`
-		cfirm_ver_tag=`echo $line | cut -d";" -f6`
+ #
+ # Controller section
+ #
+ sed '0,/Controllers/d' $CONTROLLER_FULL > $CONTROLLER_ONLY
+ grep "Channels" $CONTROLLER_FULL > /dev/null
+ if [ $? -eq 0 ]; then
+  connector_delimiter="Channels" # Older PERCs/OMSA versions
+ else
+  connector_delimiter="Connectors" # More recent PERCs/OMSA versions
+ fi
+ sed -i "/$connector_delimiter/,\$d" $CONTROLLER_ONLY
 
-	else 
+ #
+ # Battery section
+ #
+ $OMREPORT storage battery controller=$controller_id -fmt ssv | grep -i found > /dev/null
+ if [ $? -eq 1 ]; then
+  sed '0,/Battery/d' $CONTROLLER_FULL > $BATTERY_ONLY
+  sed -i '/Enclosure(s)/,$d' $BATTERY_ONLY
+ else
+  echo "\# \&clear Controller has no battery." > $BATTERY_ONLY
+ fi
 
-		cid=`echo $line | cut -d";" -f1`
-		cstatus=`echo $line | cut -d";" -f2`
-		cname=`echo $line | cut -d";" -f3`
-		cslot_id=`echo $line | cut -d";" -f4`
-		cstate=`echo $line | cut -d";" -f5`
-		cfirm=`echo $line | cut -d";" -f6`
+ #
+ # Vdisks section
+ #
+ $OMREPORT storage vdisk controller=$controller_id > $VDISKS_ONLY
+ sed -i '0,/Controller/d' $VDISKS_ONLY
+ #
+ # Separate each vdisk out into its own file
+ #
+ vdisk_count=0
+ while read line
+ do
+  echo $line | egrep '^ID' > /dev/null
+  if [ $? -eq 0 ]; then
+   vdisk_id=`echo $line | awk '{print $3}'`
+   vdisk_count=`expr $vdisk_count + 1`
+   individual_vdisk=$VDISKS_ONLY.$vdisk_id
+  fi
+  echo $line | egrep '^$' > /dev/null
+  if [ $? -eq 0 ]; then
+   individual_vdisk=/dev/null
+  fi
+  echo $line >> ${individual_vdisk}
+ done < $VDISKS_ONLY
+ 
+ #
+ # Array/Physical disks section
+ #
+ for (( vdisk_id=0; vdisk_id<$vdisk_count; vdisk_id++ ))
+ do
+  $OMREPORT storage adisk vdisk=$vdisk_id controller=$controller_id > $ADISKS_ONLY.$vdisk_id
+  sed -i "0,/Controller/d" $ADISKS_ONLY.$vdisk_id
+ done
+ 
+ #
+ # Now get the lines we want from each file and XYMONify them where necessary
+ #
+ # Controller
+ #
+ echo "Controller $controller_id" > $CONTROLLER_XYMON_OUT
+ echo "------------" >> $CONTROLLER_XYMON_OUT
+ egrep '^ID|Status|Name|^State|Slot|Version' $CONTROLLER_ONLY | while read line
+ do 
+  line_id=`echo $line | cut -d':' -f1`
+  line_state=`echo $line | cut -d':' -f2`
+  echo $line | egrep '^State|Status' > /dev/null
+  if [ $? -eq 0 ]; then
+   if [ $line_state = "Ok" -o $line_state = "Ready" ]; then
+    line=`echo \&green $(rpad \$line_id 42 '.') " :"$line_state`
+   else
+    if [ $line_state = "Non-Critical" -o $line_state = "Degraded" ]; then 
+     line=`echo \&yellow $(rpad \$line_id 42 '.')" :"$line_state`
+    else
+     line=`echo \&red $(rpad \$line_id 42 '.')" :"$line_state`
+    fi
+   fi
+  else
+   echo $line | egrep '^ID|Name|Slot' > /dev/null
+   if [ $? -eq 1 ]; then
+    echo $line | egrep 'Required.*Applicable' > /dev/null
+    if [ $? -eq 0 ]; then
+     line=`echo \&green $(rpad "$line_id" 42 '.')" :"$line_state`
+    else
+     echo $line | egrep 'Minimum.*Version.*[0-9]' > /dev/null
+     if [ $? -eq 0 ]; then
+      line=`echo \&yellow $(rpad "$line_id" 42 '.')" :"$line_state`
+     else
+      line=`echo \&clear $(rpad "$line_id" 42 '.')" :"$line_state`
+     fi
+    fi
+   else
+    line=`echo \&clear $(rpad "$line_id" 42 '.')" :"$line_state`
+   fi
+  fi
+  echo $line >> $CONTROLLER_XYMON_OUT
+ done
 
-		# Ascertain what model of PERC we're dealing with
-		controller_type=`echo ${cname:5:1}`
+ #
+ # Battery
+ #
+ echo > $BATTERY_XYMON_OUT
+ echo "Controller $controller_id : Battery" >> $BATTERY_XYMON_OUT
+ echo "----------------------" >> $BATTERY_XYMON_OUT
+ grep "has no" $BATTERY_ONLY > /dev/null
+ if [ $? -eq 1 ]; then
+  egrep 'ID|^Status|Name|State' $BATTERY_ONLY | while read line
+  do
+   line_id=`echo $line | cut -d':' -f1`
+   line_state=`echo $line | cut -d':' -f2`
+   echo $line | egrep 'Status|^State' > /dev/null
+   if [ $? -eq 0 ]; then
+    if [ $line_state = "Ok" -o $line_state = "Ready" ]; then
+     line=`echo \# \&green $(rpad "$line_id" 13 '.')" :"$line_state`
+    else
+     if [ $line_state = "Reconditioning" -o $line_state = "Charging" -o $line_state = "Non-Critical" ]; then
+      line=`echo \# \&yellow $(rpad "$line_id" 13 '.')" :"$line_state`
+     else
+      line=`echo \# \&red $(rpad "$line_id" 13 '.')" :"$line_state`
+     fi
+    fi
+   else
+    line=`echo \# \&clear $(rpad "$line_id" 13 '.')" :"$line_state`
+   fi
+   echo $line >> $BATTERY_XYMON_OUT
+  done
+ else
+  echo $line >> $BATTERY_XYMON_OUT
+ fi
 
-		#
-		# You can insert other tests here for fields such as
-		# "Minimum Required Firmware Version" or "Alarm State" if you
-		# wish.  Remember that the Controller's ID only needs to be 
-		# added to $CHECK_CONTROLLERS once if it's got a non-green result.
-		#
-		# Possible Controller States:		Possible Controller Statuses:
-		# Unknown				Other
-		# Ready					Unknown
-		# Failed				Ok
-		# Online				Non-critical
-		# Offline				Critical
-		# Degraded				Non-recoverable
-		#
+ #
+ # Vdisks
+ #
+ echo > $VDISKS_XYMON_OUT
+ for (( vdisk_id=0; vdisk_id<$vdisk_count; vdisk_id++ ))
+ do
+  echo "-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-" >> $VDISKS_XYMON_OUT
+  echo "Controller $controller_id : Virtual Disk $vdisk_id" >> $VDISKS_XYMON_OUT
+  echo "-----------------------------" >> $VDISKS_XYMON_OUT
+  egrep '^ID|Status|^Name|State|Progress|Layout' $VDISKS_ONLY.$vdisk_id | while read line
+  do
+   line_id=`echo $line | cut -d':' -f1`
+   line_state=`echo $line | cut -d':' -f2 | sed 's/^ //g'`
+   echo $line | egrep 'Status|^State' > /dev/null
+   if [ $? -eq 0 ]; then
+    if [ "$line_state" = "Ok" -o "$line_state" = "Ready" ]; then
+     line=`echo \&green $(rpad "$line_id" 42 '.')" : "$line_state`
+    elif [ "$line_state" = "No" ]; then
+     line=`echo \&green $(rpad "$line_id" 42 '.')" : "$line_state`
+    else
+     if [ "$line_state" = "Non-Critical" -o "$line_state" = "Degraded" ]; then
+      line=`echo \&yellow $(rpad "$line_id" 42 '.')" : "$line_state`
+     else
+      line=`echo \&red $(rpad "$line_id" 42 '.')" : "$line_state`
+     fi
+    fi
+   else
+    echo $line | egrep '^ID|Name|Layout' > /dev/null
+    if [ $? -eq 1 ]; then
+     echo $line | egrep '(Progress.*Applicable|Applicable.*Progress)' > /dev/null
+     if [ $? -eq 0 ]; then
+      line=`echo \&green $(rpad "$line_id" 42 '.')" : "$line_state`
+    elif [ "$line_state" = "Not Applicable" ]; then
+     line=`echo \&green $(rpad "$line_id" 42 '.')" : "$line_state`
+     else
+      line=`echo \&yellow $(rpad "$line_id" 42 '.')" : "$line_state`
+     fi
+    else
+     line=`echo \&clear $(rpad "$line_id" 42 '.')" : "$line_state`
+    fi
+   fi
+   echo $line >> $VDISKS_XYMON_OUT
+  done
 
-		echo $cid >> ${CHECK_CONTROLLERS}
-
-		lowercase_cstatus=`echo $cstatus | tr A-Z a-z`
-
-		if [[ $lowercase_cstatus == "non-critical" ]]; then
-			cstatus_colour="&yellow"
-			set_color "yellow"
-		elif [[ $lowercase_cstatus == "ok" ]]; then
-			cstatus_colour="&green"
-		else
-			cstatus_colour="&red"
-			set_color "red"
-		fi
-
-		if [[ $cstate == "Degraded" ]]; then
-			cstate_colour="&yellow"
-			set_color "yellow"
-		elif [[ $cstate == "Ready" ]]; then
-			cstate_colour="&green"
-		else
-			cstate_colour="&red"
-			set_color "red"
-		fi
-
-		OUTPUT+="\nController $cid | Controller type is a PERC $controller_type"
-		OUTPUT+="\n-------------------------------------------"
-		OUTPUT+="\n&clear $cid_tag                                : $cid"
-		OUTPUT+="\n$cstatus_colour $cstatus_tag                            : $cstatus"
-		OUTPUT+="\n&clear $cname_tag                              : $cname"
-		OUTPUT+="\n&clear $cslot_id_tag                           : $cslot_id"
-		OUTPUT+="\n$cstate_colour $cstate_tag                             : $cstate"
-		OUTPUT+="\n&clear $cfirm_ver_tag                  : $cfirm"
-
-		$OMREPORT storage battery controller=$cid -fmt ssv | grep -v "Controller" | grep -v "^$" | grep -iv "No Batteries found" > ${FILE_OMREPORT_BATTERY}
-
-		while read line; do
-			echo $line | grep Recharge > /dev/null
-			if [ $? -eq 0 ]; then
-
-				bstatus_tag=`echo $line | cut -d";" -f2`
-				bstate_tag=`echo $line | cut -d";" -f4`
-
-			else
-
-				bstatus=`echo $line | cut -d";" -f2`
-				bstate=`echo $line | cut -d";" -f4`
-
-#
-# You can insert other tests here for fields such as
-# "Recharge count" if you wish.
-#
-# Possible Battery States:	Possible Battery Statuses:
-# Unknown			Other
-# Ready				Unknown
-# Failed			Ok
-# Reconditioning		Non-critical
-# High				Critical
-# Low				Non-recoverable
-# Charging
-# Missing
-#
-
-				lowercase_bstatus=`echo $bstatus | tr A-Z a-z`
-
-				if [[ $lowercase_bstatus == "non-critical" ]]; then
-					bstatus_colour="&yellow"
-					set_color "yellow"
-				elif [[ $lowercase_bstatus == "ok" ]]; then
-					bstatus_colour="&green"
-				else
-					bstatus_colour="&red"
-					set_color "red"
-				fi
-
-				if [[ $bstate == "Reconditioning" || $bstate == "Charging" || $bstate == "Learning" ]]; then
-					bstate_colour="&yellow"
-					set_color "yellow"
-				elif [[ $bstate == "Ready" ]]; then
-					bstate_colour="&green"
-				else
-					bstate_colour="&red"
-					set_color "red"
-				fi
-
-				OUTPUT+="\n# Battery : Controller $cid"
-				OUTPUT+="\n#"
-				OUTPUT+="\n# $bstatus_colour $bstatus_tag : $bstatus"
-				OUTPUT+="\n# $bstate_colour $bstate_tag  : $bstate"
-	
-			fi
-
-		done < ${FILE_OMREPORT_BATTERY}
-
-	fi
-
-done < ${RAID_CONTROLLERS} 
-
-OUTPUT+="\n-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\n"
-
-#
-# Now check the Virtual Disks on the 'bad controllers' and display them 
-# in a similar manner to the Controllers, with their array disks below.
-#
-
-while read controller; do
-	$OMREPORT storage vdisk controller=$controller -fmt ssv | grep -v "Controller" | grep -v "^$" > ${FILE_OMREPORT_STORAGE_VDISK}
-	while read line; do 
-		echo $line | grep Layout > /dev/null
-		if [ $? -eq 0 ]; then
-	
-			vid_tag=`echo $line | cut -d";" -f1`
-			vstatus_tag=`echo $line | cut -d";" -f2`
-			vname_tag=`echo $line | cut -d";" -f3`
-			vstate_tag=`echo $line | cut -d";" -f4`
-			vprogress_tag=`echo $line | cut -d";" -f5`
-			vlayout_tag=`echo $line | cut -d";" -f6`
-	
-		else
-		
-			vid=`echo $line | cut -d";" -f1`
-			vstatus=`echo $line | cut -d";" -f2`
-			vname=`echo $line | cut -d";" -f3`
-			vstate=`echo $line | cut -d";" -f4`
-			vprogress=`echo $line | cut -d";" -f5`
-			vlayout=`echo $line | cut -d";" -f6`
-		
-#
-# You can insert other tests here for a field such as
-# "Progress" if you wish.  Remember that the Controller's 
-# ID only needs to be added to $CHECK_VIRTUAL_DISKS once if 
-# it's got a non-green result.
-#
-# Possible Virtual Disk States:		Possible Virtual Disk Statuses:
-# Unknown				Other
-# Ready					Unknown
-# Failed				Ok
-# Online				Non-critical
-# Offline				Critical
-# Degraded				Non-recoverable
-# Resynching
-# Regenerating
-# Rebuilding
-# Formatting
-# Reconstructing
-# Initializing
-# Background Initialization
-#
-
-			lowercase_vstatus=`echo $vstatus | tr A-Z a-z`
-
-			echo $vid >> ${CHECK_VIRTUAL_DISKS}
-
-			if [[ $lowercase_vstatus == "non-critical" ]]; then
-				vstatus_colour="&yellow"
-				set_color "yellow"
-			elif [[ $lowercase_vstatus == "ok" ]]; then
-				vstatus_colour="&green"
-			elif [[ $lowercase_vstatus == "no virtual disks found" ]]; then
-				vstatus_colour="&clear"
-			else
-				vstatus_colour="&red"
-				set_color "red"
-			fi
-	
-			if [[ $vstate == "Degraded" ]]; then
-				vstate_colour="&yellow"
-				set_color "yellow"
-			elif [[ $vstate == "Ready" ]]; then
-				vstate_colour="&green"
-			elif [[ $vstate == "No virtual disks found" ]]; then
-				vstate_colour="&clear"
-			else
-				vstate_colour="&red"
-					set_color "red"
-			fi
-	
-			OUTPUT+="\nVirtual Disk $vid : Controller $controller"
-			OUTPUT+="\n-------------------------------"
-			OUTPUT+="\n&clear $vid_tag           : $vid"
-			OUTPUT+="\n$vstatus_colour $vstatus_tag       : $vstatus"
-			OUTPUT+="\n&clear $vname_tag         : $vname"
-			OUTPUT+="\n$vstate_colour $vstate_tag        : $vstate"
-			OUTPUT+="\n&clear $vprogress_tag     : $vprogress"
-			OUTPUT+="\n&clear $vlayout_tag       : $vlayout"
-
-			# Check to make sure we have a numerical $vid
-			if [ "$vid" -eq "$vid" ] 2>/dev/null; then
-				$OMREPORT storage pdisk vdisk=$vid controller=$controller -fmt ssv | grep -v "List" | grep -v "Controller" | grep -v "^$" > ${FILE_OMREPORT_STORAGE_PDISK}
-				while read line; do
-					echo $line | grep Progress > /dev/null
-					if [ $? -eq 0 ]; then
-
-						aid_tag=`echo $line | cut -d";" -f1`
-						astatus_tag=`echo $line | cut -d";" -f2`
-						aname_tag=`echo $line | cut -d";" -f3`
-						astate_tag=`echo $line | cut -d";" -f4`
-
-						if [ $OMSA_VERSION -lt 500 ]; then
-							aprogress_tag=`echo $line | cut -d";" -f5`
-						else
-							afail_pred_tag=`echo $line | cut -d";" -f5`
-							aprogress_tag=`echo $line | cut -d";" -f6`
-						fi
-
-					else
-
-						aid=`echo $line | cut -d";" -f1`
-						astatus=`echo $line | cut -d";" -f2`
-						aname=`echo $line | cut -d";" -f3`
-						astate=`echo $line | cut -d";" -f4`
-
-						if [ $OMSA_VERSION -lt 500 ]; then
-							aprogress=`echo $line | cut -d";" -f5`
-						else
-							afail_pred=`echo $line | cut -d";" -f5`
-							aprogress=`echo $line | cut -d";" -f6`
-						fi
-
-#
-# You can insert other tests here for fields such as
-# "Progress" or "Hot Spare" if you wish.  At this point we
-# don't use a file to store 'bad' array disks, so there's 
-# no check for adding a disk more than once.
-#
-# Possible Array Disk States:		Possible Array Disk Statuses:
-# Ready					Other
-# Failed				Unknown
-# Online				Ok
-# Offline				Non-critical
-# Degraded				Critical
-# Recovering				Non-recoverable
-# Removed					
-# Resyncing				
-# Rebuild					
-# Formatting				
-# Diagnostics				
-#
-# Possible Failure Predicted Values:
-# Yes
-# No
-#
-
-						lowercase_astatus=`echo $astatus | tr A-Z a-z`
-						OUTPUT+="\n***$lowercase_astatus***"
-						if [[ $lowercase_astatus == "non-critical" ]]; then
-							astatus_colour="&yellow"
-							set_color "yellow"
-						elif [[ $lowercase_astatus == "ok" ]]; then
-							astatus_colour="&green"
-						else
-							astatus_colour="&red"
-							set_color "red"
-						fi
-
-						if [[ $astate == "Degraded" ]]; then
-							astate_colour="&yellow"
-							set_color "yellow"
-						elif [[ $astate == "Ready" || $astate == "Online" ]]; then
-							astate_colour="&green"
-						else
-							astate_colour="&red"
-							set_color "red"
-						fi
-
-						if [ $OMSA_VERSION -ge 500 ]; then
-							if [[ $afail_pred == "Yes" ]]; then
-								afail_colour="&red"
-								set_color "red"
-							elif [[ $afail_pred == "No" ]]; then
-								afail_colour="&green"
-							elif [[ $afail_pred == "Not Applicable" ]]; then
-								afail_colour="&clear"
-							else
-								afail_colour="&red"
-								set_color "red"
-							fi
-						fi
-
-						OUTPUT+="\n# Array Disk $aid : Virtual Disk $vid : Controller $controller"
-						OUTPUT+="\n#"
-						OUTPUT+="\n# &clear $aid_tag                        : $aid"
-						OUTPUT+="\n# $astatus_colour $astatus_tag                    : $astatus"
-						OUTPUT+="\n# &clear $aname_tag                      : $aname"
-						OUTPUT+="\n# $astate_colour $astate_tag                     : $astate"
-
-						if [ $OMSA_VERSION -ge 500 ]; then
-							OUTPUT+="\n# $afail_colour $afail_pred_tag         : $afail_pred"
-							OUTPUT+="\n# &clear $aprogress_tag                  : $aprogress"
-						else
-							OUTPUT+="\n# &clear $aprogress_tag                  : $aprogress"
-						fi
-
-					fi 
-				done < ${FILE_OMREPORT_STORAGE_PDISK}
-				OUTPUT+="\n-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\n"
-			fi
-		fi
-	done < ${FILE_OMREPORT_STORAGE_VDISK}
-done < ${CHECK_CONTROLLERS} 
-
+  #
+  # Adisks for the vdisk
+  #
+  echo >> $VDISKS_XYMON_OUT
+  echo "Controller $controller_id : Virtual Disk $vdisk_id : Array Disks" >> $VDISKS_XYMON_OUT
+  echo "-------------------------------------------" >> $VDISKS_XYMON_OUT
+  egrep '^ID|^Status|State|Name|Failure|Progress|^$' $ADISKS_ONLY.$vdisk_id | while read line
+  do
+   line_id=`echo $line | cut -d':' -f1`
+   line_state=`echo $line | cut -d':' -f2-5`
+   echo $line | egrep 'Status|^State' > /dev/null
+   if [ $? -eq 0 ]; then
+    if [ $line_state = "Ok" -o $line_state = "Online" -o $line_state = "Spun Up" -o $line_state = "Ready" -o $line_state = "Non-Critical" ]; then
+     line=`echo \# \&green $(rpad "$line_id" 40 '.')" :"$line_state`
+    else
+     if [ $line_state = "Degraded" -o $line_state = "Recovering" -o $line_state = "Resynching" -o $line_state = "Rebuild" -o $line_state = "Formatting" -o $line_state = "Initializing" ]; then
+      line=`echo \# \&yellow $(rpad "$line_id" 40 '.')" :"$line_state`
+     else
+      line=`echo \# \&red $(rpad "$line_id" 40 '.')" :"$line_state`
+     fi
+    fi
+   else
+    echo $line | egrep '^ID|Name|^$' > /dev/null
+    if [ $? -eq 1 ]; then
+     echo $line | egrep 'Failure Predicted' > /dev/null
+     if [ $? -eq 0 ]; then
+      if [ $line_state = "No" ]; then
+       line=`echo \# \&green $(rpad "$line_id" 40 '.')" :"$line_state`
+      else
+       line=`echo \# \&red $(rpad "$line_id" 40 '.')" :"$line_state`
+      fi
+     fi
+     echo $line | egrep '(Progress.*Applicable|Applicable.*Progress)' > /dev/null
+     if [ $? -eq 0 ]; then
+      line=`echo \# \&green $(rpad "$line_id" 40 '.')" :"$line_state`
+     else
+      echo $line | egrep 'Progress.*[0-9]' > /dev/null
+      if [ $? -eq 0 ]; then
+       line=`echo \# \&yellow $(rpad "$line_id" 40 '.')" :"$line_state`
+      fi
+     fi
+    else
+     echo $line | egrep '^$' > /dev/null
+     if [ $? -eq 0 ]; then
+      line=" "
+     else
+      line=`echo \# \&clear $(rpad "$line_id" 40 '.')" :"$line_state`
+     fi
+    fi
+   fi
+   echo $line >> $VDISKS_XYMON_OUT
+  done 
+ done 
+ echo "=========================================================================" >> $VDISKS_XYMON_OUT
+ cat $CONTROLLER_XYMON_OUT $BATTERY_XYMON_OUT $VDISKS_XYMON_OUT >> $CUMULATIVE_XYMON_OUT
+done
+ 
 #
 # Create the line we'll send to Big Brother
 #
-LINE="status $MACHINE.$TEST $COLOR $DATE RAID Status: `echo -e $OUTPUT`"
+grep '&yellow' $CUMULATIVE_XYMON_OUT > /dev/null
+if [ $? = 0 ]; then
+ COLOR="yellow"
+fi
 
+grep '&red' $CUMULATIVE_XYMON_OUT > /dev/null
+if [ $? = 0 ]; then
+ COLOR="red"
+fi
+
+LINE="status $MACHINE.$TEST $COLOR `date` RAID Status: `cat $CUMULATIVE_XYMON_OUT`"
 
 #########################################################
 #
@@ -507,16 +431,14 @@ LINE="status $MACHINE.$TEST $COLOR $DATE RAID Status: `echo -e $OUTPUT`"
 #
 # Otherwise send the line
 #
-$XYMON $XYMSRV "$LINE"
-
+$XYMON $XYMONDISP "$LINE"
 
 #
 # Clean up our temporary files
 #
-rm ${RAID_CONTROLLERS}
-rm ${CHECK_CONTROLLERS}
-rm ${CHECK_VIRTUAL_DISKS}
-rm ${FILE_OMREPORT_BATTERY}
-rm ${FILE_OMREPORT_STORAGE_VDISK}
-rm ${FILE_OMREPORT_STORAGE_PDISK}
+for (( vdisk_id=0; vdisk_id<=$vdisk_count; vdisk_id++ ))
+do
+ rm -rf $VDISKS_ONLY.$vdisk_id $ADISKS_ONLY.$vdisk_id
+done
+rm -rf $CONTROLLER_FULL $CONTROLLER_ONLY $BATTERY_ONLY $VDISKS_ONLY $CONTROLLER_XYMON_OUT $VDISKS_XYMON_OUT $BATTERY_XYMON_OUT $CUMULATIVE_XYMON_OUT
 
